@@ -1,14 +1,16 @@
 let canvas = document.getElementById("main-canvas");
 
+// asynchronously loads an image into an imageBitmap (for canvas rendering)
 async function fetchImage(url) {
     let imgReq = await fetch(url);
     let blob = await imgReq.blob();
-    //let image = document.createElement("img");
     return createImageBitmap(blob);
-    //image.src = URL.createObjectURL(blob);
-    //return image;
 }
 
+
+
+
+// represents a layer of tiles on the battlemap
 class TileLayer {
     constructor (options) {
         if (!options.width) throw new Error("TileLayer requires a width.");
@@ -30,21 +32,41 @@ class TileLayer {
         this.ctx = options.ctx;
     }
 
-    drawRegion(x, y, w, h) {
+
+    // draws a region of the battlemap
+    drawRegion(x, y, x2, y2) {
         this.checkTileBounds(x, y);
-        this.checkTileBounds(x + w - 1, y + h - 1);
+        this.checkTileBounds(x2 - 1, y2 - 1);
         let ctx = this.ctx;
-        for (let i = y; i < y + h; i++) {
-            for (let j = x; j < x + w; j++) {
+        for (let i = y; i < y2; i++) {
+            for (let j = x; j < x2; j++) {
                 ctx.drawImage(this.images.get(this.grid[i][j]), j, i, 1, 1);
             }
         }
     }
 
+    // draws 1/16th of a region of the battlemap (for incremental rendering with reprojection)
+    drawRegionDithered(x, y, x2, y2, index) {
+        let ditherOffsetX = [0, 2, 0, 2, 1, 3, 1, 3, 0, 2, 0, 2, 1, 3, 1, 3];
+        let ditherOffsetY = [0, 2, 2, 0, 1, 3, 3, 1, 1, 3, 3, 1, 0, 2, 2, 0];
+        this.checkTileBounds(x, y);
+        this.checkTileBounds(x2 - 1, y2 - 1);
+        let ctx = this.ctx;
+        for (let i = Math.floor(y/4)*4 + ditherOffsetY[index]; i < y2; i+=4) {
+            for (let j = Math.floor(x/4)*4 + ditherOffsetX[index]; j < x2; j+=4) {
+                if (i >= y2) continue;
+                if (j >= x2) continue;
+                ctx.drawImage(this.images.get(this.grid[i][j]), j, i, 1, 1);
+            }
+        }
+    }
+
+    // draws the entire battlemap
     draw() {
         this.drawRegion(0, 0, this.width, this.height);
     }
 
+    // checks to see if a given pair of indices corresponds to a valid tile
     checkTileBounds(x, y) {
         if (x < 0 || x >= this.width) 
             throw new Error(`Bad Tile Bounds: x = ${x} is not in the range [0, ${this.width})`);
@@ -52,37 +74,165 @@ class TileLayer {
             throw new Error(`Bad Tile Bounds: y = ${y} is not in the range [0, ${this.height})`);
     }
 
+    // returns the image of a given tile
     getTileImage(x, y) {
         this.checkTileBounds(x, y);
         return this.grid[y][x];
     }
 
+    // sets the image of a given tile
     setTileImage(x, y, image) {
         this.checkTileBounds(x, y);
         this.grid[y][x] = image;
     }
 }
 
+// layer that represents a single image that covers the entire map (currently unimplemened)
 class DrawLayer {
     constructor (options) {
         
     }
 }
 
+
+
+
+
+// if value > max, return max. if value < min, return min. otherwise, return value
+// essentially forces a value to conform to a range
+function clamp(value, min, max) {
+    return Math.max(Math.min(value, max), min);
+}
+
+
+
+// makes a canvas display the grids
 class CanvasController {
     constructor (options) {
         if (!options.canvas) throw new Error("CanvasController requires a canvas.");
         this.canvas = options.canvas;
         this.ctx = canvas.getContext("2d");
         this.layers = [];
+        this.pastPosition = { x: -99999, y: -99999 };
+        this.pastScale = 9999;
+        this.pastCorner1 = { x: -9999, y: -9999 };
+        this.pastCorner2 = { x: -9998, y: -9998 };
+        this.scaleAtLastRender = 9999999;
+        this.ditherIndex = 0;
     }
 
-    draw(dragger) {
+
+
+    // reproject previous frame onto current frame for fast execution
+    reproject(dragger) { 
+        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        let reprojectedPos1 = worldSpaceToPixelSpace(
+            this.pastCorner1.x, this.pastCorner1.y, this.canvas, dragger.scale,
+            dragger.position.x, dragger.position.y
+        );
+        let reprojectedPos2 = worldSpaceToPixelSpace(
+            this.pastCorner2.x, this.pastCorner2.y, this.canvas, dragger.scale,
+            dragger.position.x, dragger.position.y
+        );
+        this.ctx.drawImage(this.canvas, 
+            reprojectedPos1.x,
+            reprojectedPos1.y,
+            reprojectedPos2.x - reprojectedPos1.x,
+            reprojectedPos2.y - reprojectedPos1.y
+        );
+        let corner1 = dragger.pixelSpaceToWorldSpace(0, 0, this.canvas);
+        let corner2 = dragger.pixelSpaceToWorldSpace(this.canvas.width, this.canvas.height, this.canvas);
         dragger.applyTransforms(this.canvas, this.ctx);
-        this.layers.forEach(l => l.draw());
+        this.layers.forEach(l => {
+
+            // left side
+            l.drawRegion(
+                clamp(Math.floor(corner1.x), 0, l.width - 1),
+                clamp(Math.floor(corner1.y), 0, l.height - 1),
+                clamp(Math.ceil(this.pastCorner1.x), 1, l.width),
+                clamp(Math.ceil(corner2.y), 1, l.height)
+            );
+
+            // right side
+            l.drawRegion(
+                clamp(Math.floor(this.pastCorner2.x), 0, l.width - 1),
+                clamp(Math.floor(corner1.y), 0, l.height - 1),
+                clamp(Math.ceil(corner2.x), 1, l.width),
+                clamp(Math.ceil(corner2.y), 1, l.height)
+            );
+
+            // up side
+            l.drawRegion(
+                clamp(Math.floor(this.pastCorner1.x), 0, l.width - 1),
+                clamp(Math.floor(corner1.y), 0, l.height - 1),
+                clamp(Math.ceil(this.pastCorner2.x), 1, l.width),
+                clamp(Math.ceil(this.pastCorner1.y), 1, l.height)
+            );
+
+            // down side
+            l.drawRegion(
+                clamp(Math.floor(this.pastCorner1.x), 0, l.width - 1),
+                clamp(Math.floor(this.pastCorner2.y), 0, l.height - 1),
+                clamp(Math.ceil(this.pastCorner2.x), 1, l.width),
+                clamp(Math.ceil(corner2.y), 1, l.height)
+            );
+        });
+    }
+
+
+    // updates "previous position" variables for reprojection purposes
+    updatePosition(dragger) {
+        let corner1 = dragger.pixelSpaceToWorldSpace(0, 0, this.canvas);
+        let corner2 = dragger.pixelSpaceToWorldSpace(this.canvas.width, this.canvas.height, this.canvas);
+        this.pastCorner1 = { x: corner1.x, y: corner1.y };
+        this.pastCorner2 = { x: corner2.x, y: corner2.y };
+        this.pastPosition = { x: dragger.position.x, y: dragger.position.y };
+        this.pastScale = dragger.scale;
+    }
+
+
+    // draws a single frame
+    draw(dragger) {
+        if (this.pastPosition.x == dragger.position.x && this.pastPosition.y == dragger.position.y && this.scaleAtLastRender == dragger.scale) return;
+        this.reproject(dragger);
+        this.updatePosition(dragger);
+        
+        if (this.scaleAtLastRender == dragger.scale) return;
+
+        this.scaleAtLastRender = dragger.scale;
+        let corner1 = dragger.pixelSpaceToWorldSpace(0, 0, this.canvas);
+        let corner2 = dragger.pixelSpaceToWorldSpace(this.canvas.width, this.canvas.height, this.canvas);
+        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        dragger.applyTransforms(this.canvas, this.ctx);
+        this.layers.forEach(l => {
+            l.drawRegionDithered(
+                clamp(Math.floor(corner1.x), 0, l.width),
+                clamp(Math.floor(corner1.y), 0, l.height),
+                clamp(Math.ceil(corner2.x), 0, l.width),
+                clamp(Math.ceil(corner2.y), 0, l.height),
+                this.ditherIndex % 16
+            );
+        });
+        this.ditherIndex++;
+        this.updatePosition(dragger);
     }
 }
 
+
+// converts coordinates on the game board to pixel coordinates on the screen
+function worldSpaceToPixelSpace(x, y, c, scale, posx, posy) {
+    x -= posx;
+    y -= posy;
+    x *= scale;
+    y *= scale;
+    x += c.width / 2;
+    y += c.height / 2;
+    return { x, y };
+}
+
+
+
+// implements logic for "dragging" the interior of an element
 class ElementDragger {
     constructor (elem) {
         let mouseDown = false;
@@ -98,13 +248,13 @@ class ElementDragger {
         this.mouseMoveHandler = e => {
             if (mouseDown) {
                 this.position = {
-                    x: this.position.x + e.movementX / this.scale,
-                    y: this.position.y + e.movementY / this.scale
+                    x: this.position.x - e.movementX / this.scale,
+                    y: this.position.y - e.movementY / this.scale
                 };
             }
         }
         this.wheelHandler = e => {
-            this.scale *= (1 + 0.1 * Math.sign(e.deltaY));
+            this.scale *= (1 + 0.04 * Math.sign(e.deltaY));
         }
         elem.addEventListener("mousedown", this.mouseDownHandler);
         elem.addEventListener("mouseup", this.mouseUpHandler);
@@ -112,23 +262,29 @@ class ElementDragger {
         elem.addEventListener("wheel", this.wheelHandler);
     }
 
+    
+
+    // apply the transformations of the dragger to a given canvas
     applyTransforms(c, ctx) {
         ctx.translate(c.width / 2, c.height / 2);
         ctx.scale(this.scale, this.scale);
-        ctx.translate(this.position.x, this.position.y);
-        //ctx.setTransform(this.scale, 1, 1, this.scale, this.position.x, this.position.y);
+        ctx.translate(-this.position.x, -this.position.y);
     }
 
+
+    // convert pixel coordinates to coordinates within the dragger's world
     pixelSpaceToWorldSpace(x, y, c) {
-        x += c.width / 2;
-        y += c.height / 2;
-        x *= this.scale;
-        y *= this.scale;
+        x -= c.width / 2;
+        y -= c.height / 2;
+        x /= this.scale;
+        y /= this.scale;
         x += this.position.x
         y += this.position.y
         return { x, y };
     }
 
+
+    // remove the dragger from an element
     disableDragging() {
         this.elem.removeEventListener("mousedown", this.mouseDownHandler);
         this.elem.removeEventListener("mouseup", this.mouseUpHandler);
@@ -137,6 +293,8 @@ class ElementDragger {
     }
 }
 
+
+// creates a tree of HTML from a JavaScript object
 function makeHTMLTree(tree) {
     if (!tree.tag) throw new Error("Cannot make an HTML tree without a tag!");
     let elem = document.createElement(tree.tag);
@@ -157,6 +315,8 @@ function makeHTMLTree(tree) {
     return elem;
 }
 
+
+// test (I will remove later)
 document.body.appendChild(makeHTMLTree({
     tag: "div",
     attr: {},
@@ -172,6 +332,8 @@ document.body.appendChild(makeHTMLTree({
     ]
 }));
 
+
+// test (I will remove/modify later)
 async function testMain() {
     let c =  document.getElementById("main-canvas");
     let ctx = c.getContext("2d");
@@ -186,33 +348,25 @@ async function testMain() {
     let controller = new CanvasController({ canvas: c });
     for (let i = 0; i < 3; i++) {
         let tl = new TileLayer({
-            width: 12,
-            height: 12,
+            width: 256,
+            height: 256,
             images: imageLUT,
             ctx
         });
         controller.layers.push(tl);
 
-        for (let i = 0; i < 12; i++) {
-            for (let j = 0; j < 12; j++) {
-                tl.grid[i][j] = Math.floor(Math.random() * 3);
+        for (let i = 0; i < 256; i++) {
+            for (let j = 0; j < 256; j++) {
+                tl.grid[i][j] = Math.floor((i + j) % 3);
             }
         }
     }
 
     function loop() {
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.fillRect(0, 0, c.width, c.height);
-        // dragger.applyTransforms(c, ctx);
-        // tl.drawRegion(0, 0, 12, 12);
         controller.draw(dragger);
         requestAnimationFrame(loop);
     }
     loop();
-
-    //ctx.scale(64, 64);
-    //ctx.drawImage(imageLUT.get(1), 0, 0, 2, 2);
-    //document.body.appendChild(imageLUT.get(1));
 }
 
 testMain();
