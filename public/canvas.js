@@ -162,8 +162,7 @@ class ShapeLayer {
         let regionCenterY = (y1 + y2) / 2;
         this.shapes.forEach(shape => {
             let shapeCenterX = (shape.x1 + shape.x2) / 2;
-            let shapeCenterY = (shape.y1 + shape.y2) / 2;
-            console.log(x1, Math.abs(shapeCenterX - regionCenterX));
+            let shapeCenterY = (shape.y1 + shape.y2) / 2
             if (
                 Math.abs(shapeCenterX - regionCenterX) < ((shapeCenterX - shape.x1) + (regionCenterX - x1))
                 && Math.abs(shapeCenterY - regionCenterY) < ((shapeCenterY - shape.y1) + (regionCenterY - y1))
@@ -209,15 +208,17 @@ class CanvasController {
 
         this.tileLayerCanvas = document.createElement("canvas");
         this.tileLayerCtx = this.tileLayerCanvas.getContext("2d");
+        this.redrawNeeded = true;
 
-        let resizeHandler = e => {
+        this.resizeHandler = e => {
             this.canvas.width = window.innerWidth;
             this.canvas.height = window.innerHeight;
             this.tileLayerCanvas.width = window.innerWidth;
             this.tileLayerCanvas.height = window.innerHeight;
+            this.redrawNeeded = true;
         };
-        resizeHandler();
-        window.addEventListener("resize", resizeHandler);
+        this.resizeHandler();
+        window.addEventListener("resize", this.resizeHandler);
     }
 
 
@@ -315,35 +316,50 @@ class CanvasController {
 
     // draws a single frame
     draw(dragger) {
-        if (this.pastPosition.x == dragger.position.x && this.pastPosition.y == dragger.position.y && this.scaleAtLastRender == dragger.scale) return;
+        if (
+            !this.redrawNeeded 
+            && this.pastPosition.x == dragger.position.x 
+            && this.pastPosition.y == dragger.position.y 
+            && this.scaleAtLastRender == dragger.scale) return;
         this.reproject(dragger);
 
         let corner1 = dragger.pixelSpaceToWorldSpace(0, 0, this.canvas);
         let corner2 = dragger.pixelSpaceToWorldSpace(this.canvas.width, this.canvas.height, this.canvas);
 
         this.drawTilesOntoMainCanvas(dragger, corner1, corner2);
-        if (this.scaleAtLastRender == dragger.scale) return;
+        if (!this.redrawNeeded && this.scaleAtLastRender == dragger.scale) return;
 
         this.scaleAtLastRender = dragger.scale;
         this.tileLayerCtx.setTransform(1, 0, 0, 1, 0, 0);
 
         dragger.applyTransforms(this.tileLayerCanvas, this.tileLayerCtx);
-        this.layers.forEach(l => {
-            l.drawRegionDithered(
-                this.tileLayerCtx,
-                clamp(Math.floor(corner1.x), 0, l.width),
-                clamp(Math.floor(corner1.y), 0, l.height),
-                clamp(Math.ceil(corner2.x), 0, l.width),
-                clamp(Math.ceil(corner2.y), 0, l.height),
-                this.ditherIndex % 16
-            );
-        });
+        let repeat = this.redrawNeeded ? 16 : (dragger.scale > 20 ? 4 : 1);
 
-        this.ditherIndex++;
+        for (let i = 0; i < repeat; i++) {
+            this.layers.forEach(l => {
+                l.drawRegionDithered(
+                    this.tileLayerCtx,
+                    clamp(Math.floor(corner1.x), 0, l.width),
+                    clamp(Math.floor(corner1.y), 0, l.height),
+                    clamp(Math.ceil(corner2.x), 0, l.width),
+                    clamp(Math.ceil(corner2.y), 0, l.height),
+                    this.ditherIndex % 16
+                );
+            });
+            this.ditherIndex++;
+        }
+
+        this.redrawNeeded = false;
+
         this.updatePosition(dragger);
 
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
         this.drawTilesOntoMainCanvas(dragger, corner1, corner2);
+    }
+
+
+    disableController() {
+        window.removeEventListener("resize", this.resizeHandler);
     }
 }
 
